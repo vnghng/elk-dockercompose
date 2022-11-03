@@ -1,0 +1,173 @@
+version: '3'
+
+services:
+  create_certs:
+    container_name: create_certs
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.13.1
+    command: >
+      bash -c '
+        if [[ ! -f ./config/certificates/elastic-certificates.p12 ]]; then
+          bin/elasticsearch-certutil cert -out config/certificates/elastic-certificates.p12 -pass ""
+        fi;
+        if [ ! -f config/certs/ca.zip ]; then
+          echo "Creating CA";
+          bin/elasticsearch-certutil ca --silent --pem -out config/certificates/ca.zip;
+          unzip config/certificates/ca.zip -d config/certificates;
+        fi;
+        chown -R 1000:0 /usr/share/elasticsearch/config/certificates
+      '
+    user: "0"
+    working_dir: /usr/share/elasticsearch
+    volumes: ['certs:/usr/share/elasticsearch/config/certificates']
+
+  elasticsearch01:
+    container_name: elasticsearch01
+    depends_on: [create_certs]
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.13.1
+    environment:
+      - node.name=es01
+      - cluster.name=auditor-cluster
+      - cluster.initial_master_nodes=es01
+      - discovery.seed_hosts=elasticsearch02
+      - bootstrap.memory_lock=true
+      - node.master=true
+      - node.data=true
+      - node.max_local_storage_nodes=3
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - ELASTIC_PASSWORD=abc123  
+      - xpack.security.enabled=true
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.verification_mode=certificate
+      - xpack.security.transport.ssl.keystore.path=/usr/share/elasticsearch/config/certificates/elastic-certificates.p12
+      - xpack.security.transport.ssl.truststore.path=/usr/share/elasticsearch/config/certificates/elastic-certificates.p12
+    volumes: ['esdata:/usr/share/elasticsearch/config/certificates/', 'certs:/usr/share/elasticsearch/config/certificates']
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    networks: 
+      - elastic
+
+  elasticsearch02:
+    container_name: elasticsearch02
+    depends_on: 
+      - create_certs
+      - elasticsearch01
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.13.1
+    environment:
+      - node.name=es02
+      - cluster.name=auditor-cluster
+      - cluster.initial_master_nodes=es01
+      - discovery.seed_hosts=elasticsearch01
+      - bootstrap.memory_lock=true    
+      - node.master=false
+      - node.data=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - ELASTIC_PASSWORD=abc123  
+      - node.max_local_storage_nodes=3
+      - xpack.security.enabled=true
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.verification_mode=certificate
+      - xpack.security.transport.ssl.keystore.path=/usr/share/elasticsearch/config/certificates/elastic-certificates.p12
+      - xpack.security.transport.ssl.truststore.path=/usr/share/elasticsearch/config/certificates/elastic-certificates.p12
+    volumes: ['esdata:/usr/share/elasticsearch/config/certificates/', 'certs:/usr/share/elasticsearch/config/certificates']
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9300:9200"
+    networks:
+      - elastic      
+
+  kibana:
+    container_name: kibana
+    depends_on: 
+      - elasticsearch01
+    image: docker.elastic.co/kibana/kibana:7.13.1
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch01:9200
+      - ELASTICSEARCH_USERNAME=elastic
+      - ELASTICSEARCH_PASSWORD=abc123
+      - server.ssl.certificate=/usr/share/kibana/config/ca/ca.crt
+      - server.ssl.key=/usr/share/kibana/config/ca/ca.key        
+    volumes: ['kibanadata:/usr/share/kibana/config/', 'certs:/usr/share/elasticsearch/config/certificates']
+    ports:
+      - "5601:5601"
+    networks:
+      - elastic      
+  
+  apm-server01:
+    container_name: apm-server
+    depends_on:
+      - elasticsearch01
+      - kibana
+    image: docker.elastic.co/apm/apm-server:7.13.1
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]
+    cap_drop: ["ALL"]
+    command: >
+      apm-server -e
+         -E apm-server.rum.enabled=true
+         -E setup.kibana.host=kibana:5601
+         -E setup.template.settings.index.number_of_replicas=0
+         -E apm-server.kibana.enabled=true
+         -E apm-server.kibana.host=kibana:5601
+         -E apm-server.kibana.username=elastic
+         -E apm-server.kibana.password=abc123
+         -E output.elasticsearch.hosts=["elasticsearch01:9200"]
+         -E output.elasticsearch.username=elastic
+         -E output.elasticsearch.password=abc123
+         -E monitoring.enabled=true
+         -E output.elasticsearch.username=elastic
+         -E output.elasticsearch.password=abc123
+    healthcheck:
+      interval: 10s
+      retries: 12
+      test: curl --write-out 'HTTP %{http_code}' --fail --silent --output /dev/null http://localhost:8200/
+    logging:
+      options:
+        max-size: 100m
+    networks:
+      - elastic
+
+  apm-server02:
+    container_name: apm-server02
+    depends_on:
+      - elasticsearch01
+      - kibana
+    image: docker.elastic.co/apm/apm-server:7.13.1
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]
+    cap_drop: ["ALL"]
+    command: >
+      apm-server -e
+         -E apm-server.rum.enabled=true
+         -E setup.kibana.host=kibana:5601
+         -E setup.template.settings.index.number_of_replicas=0
+         -E apm-server.kibana.enabled=true
+         -E apm-server.kibana.host=kibana:5601
+         -E apm-server.kibana.username=elastic
+         -E apm-server.kibana.password=abc123
+         -E output.elasticsearch.hosts=["elasticsearch01:9200"]
+         -E output.elasticsearch.username=elastic
+         -E output.elasticsearch.password=abc123
+         -E monitoring.enabled=true
+         -E output.elasticsearch.username=elastic
+         -E output.elasticsearch.password=abc123
+    healthcheck:
+      interval: 10s
+      retries: 12
+      test: curl --write-out 'HTTP %{http_code}' --fail --silent --output /dev/null http://localhost:8200/
+    logging:
+      options:
+        max-size: 100m
+    networks:
+      - elastic
+
+
+
+volumes: {"esdata", "certs","kibanadata" }
+networks:
+        elastic:
+         driver: bridge
